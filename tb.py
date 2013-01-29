@@ -1,246 +1,137 @@
-import sys
-import sqlite3
-
-
-from decimal import Decimal
+from sqlalchemy import create_engine
+from sqlalchemy import Column, Date, Integer, Numeric, String, ForeignKey
+from sqlalchemy.orm import sessionmaker, relationship, backref
+from sqlalchemy.ext.declarative import declarative_base
 from ofxparse import OfxParser
+from decimal import Decimal as D
 
-'''
-BEGIN SETTINGS
-'''
+import sqlalchemy.types as types
+import sys
 
-# Name of sqlite database
-SQLITE_DB_NAME = "tb.db"
+engine = create_engine('sqlite:///tb.db', echo=True)
+Base = declarative_base()
 
-'''
-END SETTINGS
-'''
+Session = sessionmaker(bind=engine)
+session = Session()
 
-class Account(object):
-	def __init__(self):
-		self.number = None
-		self.balance = None
-		self.balance_date = None
-		# Put other attributes here
+####################
+class SqliteNumeric(types.TypeDecorator):
+    impl = types.String
+    def load_dialect_impl(self, dialect):
+        return dialect.type_descriptor(types.VARCHAR(100))
+    def process_bind_param(self, value, dialect):
+        return str(value)
+    def process_result_value(self, value, dialect):
+        return D(value)
 
-	def __str__(self):
-		return "[Account number:{0}, balance:{1}, balance_date:{2}]".format(self.number, self.balance, self.balance_date)
+Numeric = SqliteNumeric
+####################
+class Account(Base):
+	"""Physical financial account"""
 
-class Transaction(object):
-	"""Financial transaction object"""
-	def __init__(self):
-		self.payee = None
-		self.type = None
-		self.date = None
-		self.amount = None
-		self.foreign_id = None
-		self.memo = None
+	__tablename__ = "accounts"
 
-	def __str__(self):
-		return "[Transaction payee: {0}, type: {1}, date: {2}, amount: {3}]".format(self.payee, self.type, self.date, self.amount)
+	id = Column(Integer, primary_key=True)
+	number = Column(String, unique=True, nullable = False)
+	balance = Column(Numeric, nullable = False)
+	balance_date = Column(Date, nullable = False)
 
+	def __init__(self, number, balance, balance_date):
+		self.number = number
+		self.balance = balance
+		self.balance_date = balance_date
+####################
+class Transaction(Base):
+	"""Physical financial transactions"""
 
-'''
-BEGIN Sql
-'''
+	__tablename__ = "transactions"
 
-def sqlite_adapt_decimal(d):
-	return str(d)
+	id = Column(Integer, primary_key = True)
+	account_id = Column(Integer, ForeignKey('accounts.id'))
+	payee = Column(String, nullable = False)
+	type = Column(String, nullable = False)
+	date = Column(Date, nullable = False)
+	amount = Column(Numeric, nullable = False)
+	foreign_id = Column(String, nullable = False, unique = True)
+	memo = Column(String, nullable = False)
 
-def sqlite_convert_decimal(s):
-	return Decimal(s)
+	account = relationship("Account", backref=backref('transactions', order_by=id))
 
-class DBConnectionManager(object):
-	def __init__(self):
-		sqlite3.register_adapter(Decimal, sqlite_adapt_decimal)
-		sqlite3.register_converter("decimal", sqlite_convert_decimal)
-
-	def get_connection(self):
-		# May need to be more intelligent about this
-		return sqlite3.connect(SQLITE_DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES)
-
-
-class AccountSqliteAccess(object):
-	"""Class to access sqlite-backed accounts"""
-
-	DDL_ACCOUNT_CREATE = """
-	CREATE TABLE IF NOT EXISTS
-	accounts
-	(
-		id INTEGER NOT NULL,
-		number TEXT NOT NULL,
-		balance DECIMAL NOT NULL,
-		balance_date TIMESTAMP NOT NULL,
-		PRIMARY KEY (id),
-		UNIQUE (number)
-	)
-	"""
-
-	DML_ACCOUNT_INSERT = """
-	INSERT OR IGNORE INTO accounts
-	(
-		number, balance, balance_date
-	)
-	VALUES
-	(
-		:number, :balance, :balance_date
-	)
-	"""
-
-	DML_ACCOUNT_UPDATE = """
-	UPDATE accounts
-	SET
-		balance = :balance,
-		balance_date = :balance_date
-	WHERE
-		number = :number
-	"""
-
-	def __init__(self, db):
-		self.db = db
-
-	def _setup_table(self, db_connection):
-		with db_connection:
-			c = db_connection.cursor()
-			c.execute(self.DDL_ACCOUNT_CREATE)
-			
-	
-	def insert(self, account):
-		con = self.db.get_connection()
-		try:
-			with con:
-				self._setup_table(con)
-				c = con.cursor()
-				c.execute(self.DML_ACCOUNT_INSERT, {
-					'number': account.number,
-					'balance': account.balance,
-					'balance_date': account.balance_date
-					})
-				rowcount = c.rowcount
-
-		finally:
-			con.close()
-
-		return rowcount
-
-	def update(self, account):
-		con = self.db.get_connection()
-		try:
-			with con:
-				self._setup_table(con)
-				c = con.cursor()
-				c.execute(self.DML_ACCOUNT_UPDATE, {
-					'number': account.number,
-					'balance': account.balance,
-					'balance_date': account.balance_date
-					})
-
-				rowcount = c.rowcount
-		finally:
-			con.close()
-
-		return rowcount
-
-
-'''
-END Sql
-'''
-
-'''
-BEGIN OFX
-'''
-
-class OfxFileDataLoader(object):
-	def __init__(self, ofx_file):
-		self.ofx_file = ofx_file
-		self.ofx_data = None
-
-	def fetch(self):
-		'''
-		Fetches the ofx_data from given file path (once)
-		'''
-
-		if self.ofx_data == None:
-			self.ofx_data = OfxParser.parse(file(self.ofx_file))
-
-		return self.ofx_data
-
-class AccountsOfxMapper(object):
-	def __init__(self, ofx_data_loader):
-		self.ofx_data_loader = ofx_data_loader
-
-	def get_account(self):
-		'''
-		Maps the OFX Account object
-		into a TB Account object
-		'''
-
-		account = Account()
-		data = self.ofx_data_loader.fetch()
-
-		account.number = data.account.number
-		account.balance = data.account.statement.balance
-		account.balance_date = data.account.statement.end_date
-		# Put other attribute mappings here
-
-		return account
-
-class TransactionsOfxMapper(object):
-	def __init__(self, ofx_data_loader):
-		self.ofx_data_loader = ofx_data_loader
-
-	def get_transactions(self):
-		'''
-		Maps the OFX Transactions list
-		into a TB Transactions list
-		'''
-
-		transactions = []
-		data = self.ofx_data_loader.fetch()
-
-		for ofx_transaction in data.account.statement.transactions:
-			transaction = Transaction()
-			transaction.payee = ofx_transaction.payee
-			transaction.type = ofx_transaction.type
-			transaction.date = ofx_transaction.date
-			transaction.amount = ofx_transaction.amount
-			transaction.foreign_id = ofx_transaction.id
-			transaction.memo = ofx_transaction.memo
-
-			transactions.insert(0, transaction)
-			# Put other attribute mappings here
-
-		return transactions
-
-'''
-END OFX
-'''
+	def __init__(self, payee, type, date, amount, foreign_id, memo):
+		self.payee = payee
+		self.type = type
+		self.date = date
+		self.amount = amount
+		self.foreign_id = foreign_id
+		self.memo = memo
+####################
 
 
 def main():
+	Base.metadata.create_all(engine)
+
 	file_path = sys.argv[1]
-	data_loader = OfxFileDataLoader(file_path)
-	accounts_mapper = AccountsOfxMapper(data_loader)
-	account = accounts_mapper.get_account()
 
-	transactions_mapper = TransactionsOfxMapper(data_loader)
-	transactions = transactions_mapper.get_transactions()
+	# Expensive statement...
+	ofx = OfxParser.parse(file(file_path))
 
-	db_conn = DBConnectionManager()
-	accounts_db = AccountSqliteAccess(db_conn)
+	account = Account(ofx.account.number, 
+		ofx.account.statement.balance,
+		ofx.account.statement.end_date)
 
-	rows = 0
-	updated_rows = 0
+	existing_account = session.query(Account).filter_by(number=account.number).first()
+	if existing_account:
+		account.id = existing_account.id
 
-	rows = accounts_db.insert(account)
+	# Bulk insert...
+	transactions = []
+	for ofx_transaction in ofx.account.statement.transactions:
+		transactions.insert(0,
+			{
+				'account_id': account.id,
+				'payee': ofx_transaction.payee,
+				'type': ofx_transaction.type,
+				'date': ofx_transaction.date,
+				'amount': ofx_transaction.amount,
+				'foreign_id': ofx_transaction.id,
+				'memo': ofx_transaction.memo
+			}
+		)
+	session.execute(
+		Transaction.__table__.insert().prefix_with("OR IGNORE"),
+		transactions
+	)
 
-	if rows <= 0:
-		updated_rows = accounts_db.update(account)
+	# IN ORDER TO SUPPORT COMPLETE UPDATES OF TRANSACTIONS
+	# TODO
+	# 1. Load all transactions into temp table
+	# 2. Delete all transactions from real table not in temp table
+	# 3. Insert or ignore all transactions into real table from temp
+	# 4. Update all transactions into real table from temp
+	# 5. Drop temp table
 
-	print account
-	print transactions[0]
-	print "Insert rows affected: ", rows
-	print "Update rows affected: ", updated_rows
-
+	session.merge(account)
+	session.commit()
+	
 if __name__ == '__main__':
 	main()
+
+"""
+TODO:
+ 	- User account: Login/Logout/Register/Forgot Password
+ 	- OFX upload form
+ 	- Physical accounts
+ 	- Physical transactions
+ 	- Virtual accounts
+ 		-- Inbox
+ 		-- Other accounts
+ 	-- Virtual transctions
+ 		-- Transfers
+ 		-- Splits
+ 	-- Reporting
+ 		-- (Look around for these)
+ 	-- Planning
+ 		-- Scheduled (one-time/repeating) transactions
+ 		-- Cashflow/balance forecast
+ 			-- Projected vs actual
+"""
